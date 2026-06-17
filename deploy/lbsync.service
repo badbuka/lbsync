@@ -1,0 +1,26 @@
+[Unit]
+Description=lbsync load-balancer coordination agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Create a dedicated user/group and grant read on /etc/letsencrypt and
+# read/write on the serving dir. Private keys are written 0600.
+User=lbsync
+Group=lbsync
+EnvironmentFile=/etc/lbsync/lbsync.env
+ExecStart=/usr/local/bin/lbsync
+Restart=on-failure
+RestartSec=5s
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/etc/lbsync/live
+ReadOnlyPaths=/etc/letsencrypt
+
+[Install]
+WantedBy=multi-user.target

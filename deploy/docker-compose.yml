@@ -1,0 +1,62 @@
+# Local 3-node lbsync cluster for end-to-end testing.
+#
+# Each node mounts its own certbot input and serving output. In a real
+# deployment only the renewing node(s) have fresh certs under certbot; the
+# others receive them via the cluster and write them to the serving dir.
+#
+# The cluster password and gossip key are shared by all nodes. Generate a
+# gossip key with: head -c 32 /dev/urandom | base64
+services:
+  node1:
+    build: ..
+    command:
+      - -peers=node2:3322,node3:3322
+      - -advertise-addr=node1
+      - -modules=certs
+    environment:
+      CLUSTER_PASSWORD: change-me
+      CLUSTER_GOSSIP_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      CLUSTER_ENV: lan
+      RELOAD_CMD: "true"
+      VERIFY_CMD: "true"
+    ports:
+      - "8623:8623"
+    volumes:
+      - ./testdata/node1/letsencrypt:/etc/letsencrypt:ro
+      - ./testdata/node1/serving:/etc/lbsync/live
+
+  node2:
+    build: ..
+    command:
+      - -peers=node1:3322,node3:3322
+      - -advertise-addr=node2
+      - -modules=certs
+    environment:
+      CLUSTER_PASSWORD: change-me
+      CLUSTER_GOSSIP_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      CLUSTER_ENV: lan
+      RELOAD_CMD: "true"
+      VERIFY_CMD: "true"
+    ports:
+      - "8624:8623"
+    volumes:
+      - ./testdata/node2/letsencrypt:/etc/letsencrypt:ro
+      - ./testdata/node2/serving:/etc/lbsync/live
+
+  node3:
+    build: ..
+    command:
+      - -peers=node1:3322,node2:3322
+      - -advertise-addr=node3
+      - -modules=certs
+    environment:
+      CLUSTER_PASSWORD: change-me
+      CLUSTER_GOSSIP_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      CLUSTER_ENV: lan
+      RELOAD_CMD: "true"
+      VERIFY_CMD: "true"
+    ports:
+      - "8625:8623"
+    volumes:
+      - ./testdata/node3/letsencrypt:/etc/letsencrypt:ro
+      - ./testdata/node3/serving:/etc/lbsync/live
