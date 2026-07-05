@@ -10,14 +10,13 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/badbuka/lbsync/internal/cluster"
 	"github.com/badbuka/lbsync/internal/engine"
 	"github.com/badbuka/lbsync/internal/metrics"
 )
 
 // Deps are the shared dependencies handed to every module at Start.
 type Deps struct {
-	Cluster *cluster.Cluster
+	Cluster engine.ClusterKV
 	Engine  *engine.Engine
 	Metrics *metrics.Metrics
 	Logf    func(format string, args ...any)

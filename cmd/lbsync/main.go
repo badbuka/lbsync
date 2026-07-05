@@ -251,7 +251,7 @@ func buildClusterConfig(cfg config, peers []string) (cluster.Config, error) {
 	}, nil
 }
 
-func startModules(ctx context.Context, cfg config, eng *engine.Engine, cl *cluster.Cluster, m *metrics.Metrics) error {
+func startModules(ctx context.Context, cfg config, eng *engine.Engine, cl engine.ClusterKV, m *metrics.Metrics) error {
 	blobResources, err := parseBlobResources(cfg.BlobResources)
 	if err != nil {
 		return fmt.Errorf("blob resources: %w", err)
