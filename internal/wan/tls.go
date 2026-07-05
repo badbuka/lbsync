@@ -22,6 +22,11 @@ import (
 //   - certFile set but caFile == "": client uses InsecureSkipVerify (TLS encryption only)
 //   - certFile == "" AND caFile == "": dev mode, client uses InsecureSkipVerify
 func buildTLSConfig(certFile, keyFile, caFile, hostname string) (*tls.Config, *tls.Config, error) {
+	// Guard: mTLS requires explicit cert files.
+	if caFile != "" && certFile == "" {
+		return nil, nil, fmt.Errorf("wan: --tls-ca requires --tls-cert and --tls-key (mTLS needs a client certificate)")
+	}
+
 	var cert tls.Certificate
 	var err error
 

@@ -1,7 +1,18 @@
-// Package wan implements an HTTPS-based distributed key-value store that
-// satisfies the engine.ClusterKV interface. It is intended as a WAN cluster
-// backend for nodes communicating over the public internet, replacing the
-// LAN-optimised Olric backend.
+// Package wan implements a WAN-safe cluster backend for lbsync using HTTPS (TLS/mTLS).
+//
+// Storage model: Each node stores only records it originated or received via fan-out.
+// This is origin-authoritative: when a node publishes a record, it fans it out to all
+// configured peers; peers store it locally. There is no replication of records not
+// explicitly pushed — if the origin node is down, other nodes cannot retrieve the record
+// via Get/Keys until the origin comes back and re-publishes.
+//
+// For the cert/blob use case this is acceptable: each node republishes its local files
+// every reconcile tick, so a missed fan-out is corrected on the next tick.
+//
+// Single-origin-per-key assumption: handlePutRecord (incoming peer pushes) uses a
+// version guard to prevent stale writes. Two nodes originating the same key
+// concurrently may cause transient disagreement; the engine's maybePublish re-check
+// provides eventual convergence.
 package wan
 
 import (
@@ -14,12 +25,16 @@ import (
 	"log"
 	"net"
 	"net/http"
+	neturl "net/url"
 	"strconv"
 	"sync"
 	"time"
 
 	"github.com/badbuka/lbsync/internal/engine"
 )
+
+// Compile-time assertion: Backend must satisfy engine.ClusterKV.
+var _ engine.ClusterKV = (*Backend)(nil)
 
 // Config configures the WAN HTTPS cluster backend.
 type Config struct {
@@ -91,15 +106,21 @@ func New(ctx context.Context, cfg Config) (*Backend, error) {
 		IdleTimeout:       30 * time.Second,
 	}
 
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("wan: listen %s: %w", addr, err)
+	}
+	tlsLn := tls.NewListener(ln, serverTLS)
 	go func() {
-		if err := b.server.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+		if err := b.server.Serve(tlsLn); err != nil && err != http.ErrServerClosed {
 			log.Printf("wan: server error: %v", err)
 		}
 	}()
 
 	b.client = &http.Client{
 		Transport: &http.Transport{
-			TLSClientConfig: clientTLS,
+			TLSClientConfig:   clientTLS,
+			ForceAttemptHTTP2: true,
 		},
 		Timeout: 10 * time.Second,
 	}
@@ -120,8 +141,8 @@ func (b *Backend) Get(ctx context.Context, kind, key string) (*engine.Record, bo
 	}
 
 	for _, peer := range b.peers {
-		url := fmt.Sprintf("https://%s/v1/records/%s/%s", peer, kind, key)
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		rawURL := fmt.Sprintf("https://%s/v1/records/%s/%s", peer, neturl.PathEscape(kind), neturl.PathEscape(key))
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 		if err != nil {
 			continue
 		}
@@ -138,6 +159,7 @@ func (b *Backend) Get(ctx context.Context, kind, key string) (*engine.Record, bo
 			}
 			return &rec, true, nil
 		}
+		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
 	}
 	return nil, false, nil
@@ -189,8 +211,8 @@ func (b *Backend) Keys(ctx context.Context, kind string) ([]string, error) {
 	})
 
 	for _, peer := range b.peers {
-		url := fmt.Sprintf("https://%s/v1/keys/%s", peer, kind)
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		rawURL := fmt.Sprintf("https://%s/v1/keys/%s", peer, neturl.PathEscape(kind))
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 		if err != nil {
 			continue
 		}
@@ -248,6 +270,7 @@ func (b *Backend) Members() int {
 				ch <- 0
 				return
 			}
+			_, _ = io.Copy(io.Discard, resp.Body)
 			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
 				ch <- 1

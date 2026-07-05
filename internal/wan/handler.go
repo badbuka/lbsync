@@ -22,15 +22,24 @@ func newMux(b *Backend) *http.ServeMux {
 func (b *Backend) handlePutRecord(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		http.Error(w, "read error", http.StatusBadRequest)
+		http.Error(w, "read body", http.StatusBadRequest)
 		return
 	}
 	rec, err := decodeRecord(body)
 	if err != nil {
-		http.Error(w, "decode error", http.StatusBadRequest)
+		http.Error(w, "decode record", http.StatusBadRequest)
 		return
 	}
-	b.store.Store(storeKey(rec.Kind, rec.Key), body)
+	k := storeKey(rec.Kind, rec.Key)
+	// Only overwrite if incoming record is strictly newer.
+	if existing, ok := b.store.Load(k); ok {
+		existingRec, err := decodeRecord(existing.([]byte))
+		if err == nil && !rec.Version.Newer(existingRec.Version) {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+	}
+	b.store.Store(k, body)
 	w.WriteHeader(http.StatusNoContent)
 }
 
