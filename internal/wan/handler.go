@@ -12,7 +12,6 @@ func newMux(b *Backend) *http.ServeMux {
 	mux.HandleFunc("PUT /v1/records", b.handlePutRecord)
 	mux.HandleFunc("GET /v1/records/{kind}/{key}", b.handleGetRecord)
 	mux.HandleFunc("GET /v1/keys/{kind}", b.handleGetKeys)
-	mux.HandleFunc("POST /v1/locks/{kind}/{key}", b.handlePostLock)
 	mux.HandleFunc("GET /v1/ping", b.handlePing)
 	return mux
 }
@@ -31,15 +30,18 @@ func (b *Backend) handlePutRecord(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	k := storeKey(rec.Kind, rec.Key)
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	// Only overwrite if incoming record is strictly newer.
-	if existing, ok := b.store.Load(k); ok {
-		existingRec, err := decodeRecord(existing.([]byte))
+	if existing, ok := b.store[k]; ok {
+		existingRec, err := decodeRecord(existing)
 		if err == nil && !rec.Version.Newer(existingRec.Version) {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 	}
-	b.store.Store(k, body)
+	b.store[k] = body
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -48,12 +50,13 @@ func (b *Backend) handlePutRecord(w http.ResponseWriter, r *http.Request) {
 func (b *Backend) handleGetRecord(w http.ResponseWriter, r *http.Request) {
 	kind := r.PathValue("kind")
 	key := r.PathValue("key")
-	val, ok := b.store.Load(storeKey(kind, key))
+	b.mu.RLock()
+	raw, ok := b.store[storeKey(kind, key)]
+	b.mu.RUnlock()
 	if !ok {
 		http.NotFound(w, r)
 		return
 	}
-	raw := val.([]byte)
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(raw)
@@ -65,13 +68,13 @@ func (b *Backend) handleGetKeys(w http.ResponseWriter, r *http.Request) {
 	kind := r.PathValue("kind")
 	prefix := kind + "\x00"
 	var keys []string
-	b.store.Range(func(k, _ any) bool {
-		sk := k.(string)
+	b.mu.RLock()
+	for sk := range b.store {
 		if len(sk) > len(prefix) && sk[:len(prefix)] == prefix {
 			keys = append(keys, sk[len(prefix):])
 		}
-		return true
-	})
+	}
+	b.mu.RUnlock()
 	if keys == nil {
 		keys = []string{}
 	}
@@ -85,14 +88,8 @@ func (b *Backend) handleGetKeys(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(raw)
 }
 
-// handlePostLock is a no-op placeholder for future distributed locking.
-func (b *Backend) handlePostLock(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusOK)
-}
-
 // handlePing responds 200 "pong" for membership probing.
 func (b *Backend) handlePing(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("pong"))
 }
-

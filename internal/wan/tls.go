@@ -13,6 +13,7 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -49,7 +50,7 @@ func buildTLSConfig(certFile, keyFile, caFile, hostname string) (*tls.Config, *t
 	clientTLS := &tls.Config{}
 
 	if caFile != "" {
-		caPEM, err := os.ReadFile(caFile)
+		caPEM, err := os.ReadFile(filepath.Clean(caFile))
 		if err != nil {
 			return nil, nil, fmt.Errorf("read CA file: %w", err)
 		}

@@ -7,7 +7,6 @@
 package discovery
 
 import (
-	"fmt"
 	"sort"
 )
 
@@ -29,13 +28,6 @@ type Config struct {
 	// CertbotRoot is the certbot root directory (<root>/live/*). Empty skips
 	// the certbot scan.
 	CertbotRoot string
-	// Paths lists explicit PEM files or directories to scan (non-recursive).
-	Paths []string
-	// RecursiveRoots lists directories walked recursively for PEM files.
-	RecursiveRoots []string
-	// Logger, if non-nil, receives per-path scan lines for Paths and
-	// RecursiveRoots. Certbot discovery is not logged.
-	Logger func(format string, args ...any)
 }
 
 // Entry is a single observation produced by ScanAllVerbose. If Error is nil
@@ -44,16 +36,6 @@ type Config struct {
 type Entry struct {
 	Cert  Cert
 	Error error
-}
-
-// Scan walks <root>/live/* via ScanAll for library backward compatibility.
-func Scan(root string) ([]Cert, error) {
-	return ScanAll(Config{CertbotRoot: root})
-}
-
-// ScanVerbose is ScanAllVerbose for a single certbot root.
-func ScanVerbose(root string) ([]Entry, error) {
-	return ScanAllVerbose(Config{CertbotRoot: root})
 }
 
 // ScanAll merges certificates from all enabled discovery sources.
@@ -84,54 +66,7 @@ func ScanAllVerbose(cfg Config) ([]Entry, error) {
 		out = append(out, entries...)
 	}
 
-	for _, p := range cfg.Paths {
-		if cfg.Logger != nil {
-			cfg.Logger("extra path scan start path=%q", p)
-		}
-		entries, err := scanPathsVerbose([]string{p})
-		if err != nil {
-			if cfg.Logger != nil {
-				cfg.Logger("extra path scan failed path=%q: %v", p, err)
-			}
-			return nil, fmt.Errorf("scan path %q: %w", p, err)
-		}
-		logScanEntries(cfg.Logger, "extra path", p, entries)
-		out = append(out, entries...)
-	}
-
-	for _, root := range cfg.RecursiveRoots {
-		if cfg.Logger != nil {
-			cfg.Logger("recursive path scan start root=%q", root)
-		}
-		entries, err := scanRecursiveVerbose([]string{root})
-		if err != nil {
-			if cfg.Logger != nil {
-				cfg.Logger("recursive path scan failed root=%q: %v", root, err)
-			}
-			return nil, fmt.Errorf("scan recursive %q: %w", root, err)
-		}
-		logScanEntries(cfg.Logger, "recursive path", root, entries)
-		out = append(out, entries...)
-	}
-
 	return mergeEntries(out), nil
-}
-
-func logScanEntries(logf func(format string, args ...any), source, root string, entries []Entry) {
-	if logf == nil {
-		return
-	}
-	var found, skipped int
-	for _, e := range entries {
-		if e.Error != nil {
-			skipped++
-			logf("%s scan skip root=%q fallback_id=%q: %v", source, root, e.Cert.FallbackID, e.Error)
-			continue
-		}
-		found++
-		logf("%s scan found root=%q lineage=%q path=%q", source, root, e.Cert.FallbackID, e.Cert.CertPath)
-	}
-	logf("%s scan done root=%q found=%d skipped=%d", source, root, found, skipped)
 }
 
 func mergeEntries(entries []Entry) []Entry {

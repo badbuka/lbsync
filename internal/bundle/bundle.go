@@ -1,6 +1,5 @@
 // Package bundle reads and writes a full certbot certificate bundle (the leaf
-// cert, private key, and optional chain/fullchain) and provides a total
-// ordering over bundle versions so the newest one can be selected.
+// cert, private key, and optional chain/fullchain).
 package bundle
 
 import (

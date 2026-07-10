@@ -19,7 +19,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
-	"encoding/gob"
 	"fmt"
 	"io"
 	"log"
@@ -31,6 +30,7 @@ import (
 	"time"
 
 	"github.com/badbuka/lbsync/internal/engine"
+	"github.com/badbuka/lbsync/internal/gobcodec"
 )
 
 // Compile-time assertion: Backend must satisfy engine.ClusterKV.
@@ -50,9 +50,12 @@ type Config struct {
 
 // Backend implements engine.ClusterKV over HTTPS.
 type Backend struct {
-	addr   string       // "bindaddr:port" used for self-identification
-	peers  []string     // peer "host:port" list
-	store  sync.Map     // storeKey(kind,key) → []byte (gob-encoded *engine.Record)
+	addr  string   // "bindaddr:port" used for self-identification
+	peers []string // peer "host:port" list
+
+	mu    sync.RWMutex
+	store map[string][]byte // storeKey(kind,key) → gob-encoded *engine.Record
+
 	server *http.Server
 	client *http.Client // shared TLS client for peer calls
 }
@@ -77,6 +80,7 @@ func New(ctx context.Context, cfg Config) (*Backend, error) {
 	b := &Backend{
 		addr:  addr,
 		peers: cfg.Peers,
+		store: make(map[string][]byte),
 	}
 
 	var serverTLS *tls.Config
@@ -132,8 +136,11 @@ func New(ctx context.Context, cfg Config) (*Backend, error) {
 // It checks the local store first; on a miss it queries each peer in order and
 // returns the first successful response.
 func (b *Backend) Get(ctx context.Context, kind, key string) (*engine.Record, bool, error) {
-	if val, ok := b.store.Load(storeKey(kind, key)); ok {
-		rec, err := decodeRecord(val.([]byte))
+	b.mu.RLock()
+	val, ok := b.store[storeKey(kind, key)]
+	b.mu.RUnlock()
+	if ok {
+		rec, err := decodeRecord(val)
 		if err != nil {
 			return nil, false, err
 		}
@@ -151,13 +158,16 @@ func (b *Backend) Get(ctx context.Context, kind, key string) (*engine.Record, bo
 			continue
 		}
 		if resp.StatusCode == http.StatusOK {
-			var rec engine.Record
-			decErr := gob.NewDecoder(resp.Body).Decode(&rec)
+			body, readErr := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
+			if readErr != nil {
+				continue
+			}
+			rec, decErr := decodeRecord(body)
 			if decErr != nil {
 				continue
 			}
-			return &rec, true, nil
+			return rec, true, nil
 		}
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
@@ -171,14 +181,16 @@ func (b *Backend) Put(ctx context.Context, r *engine.Record) error {
 	if err != nil {
 		return err
 	}
-	b.store.Store(storeKey(r.Kind, r.Key), raw)
+	b.mu.Lock()
+	b.store[storeKey(r.Kind, r.Key)] = raw
+	b.mu.Unlock()
 
+	// Detach from ctx's cancellation (but keep its values) so caller
+	// cancellation does not abort the fan-out (best-effort convergence).
+	detached := context.WithoutCancel(ctx)
 	for _, peer := range b.peers {
-		peer := peer
 		go func() {
-			// Use an independent 5s timeout so caller cancellation does not
-			// abort the fan-out (best-effort convergence).
-			pctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			pctx, cancel := context.WithTimeout(detached, 5*time.Second)
 			defer cancel()
 			url := fmt.Sprintf("https://%s/v1/records", peer)
 			req, err := http.NewRequestWithContext(pctx, http.MethodPut, url, bytes.NewReader(raw))
@@ -202,13 +214,13 @@ func (b *Backend) Keys(ctx context.Context, kind string) ([]string, error) {
 	prefix := kind + "\x00"
 	seen := map[string]struct{}{}
 
-	b.store.Range(func(k, _ any) bool {
-		sk := k.(string)
+	b.mu.RLock()
+	for sk := range b.store {
 		if len(sk) > len(prefix) && sk[:len(prefix)] == prefix {
 			seen[sk[len(prefix):]] = struct{}{}
 		}
-		return true
-	})
+	}
+	b.mu.RUnlock()
 
 	for _, peer := range b.peers {
 		rawURL := fmt.Sprintf("https://%s/v1/keys/%s", peer, neturl.PathEscape(kind))
@@ -255,7 +267,6 @@ func (b *Backend) Lock(_ context.Context, _, _ string, _ time.Duration) (func(),
 func (b *Backend) Members() int {
 	ch := make(chan int, len(b.peers))
 	for _, peer := range b.peers {
-		peer := peer
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
@@ -291,36 +302,16 @@ func (b *Backend) Close(ctx context.Context) error {
 	return b.server.Shutdown(ctx)
 }
 
-// ---- gob helpers (adapted from internal/cluster/cluster.go) ----
-
-func encodeRecord(r *engine.Record) ([]byte, error) {
-	var buf bytes.Buffer
-	if err := gob.NewEncoder(&buf).Encode(r); err != nil {
-		return nil, fmt.Errorf("gob encode record: %w", err)
-	}
-	return buf.Bytes(), nil
-}
+func encodeRecord(r *engine.Record) ([]byte, error) { return gobcodec.Encode(r) }
 
 func decodeRecord(raw []byte) (*engine.Record, error) {
-	var r engine.Record
-	if err := gob.NewDecoder(bytes.NewReader(raw)).Decode(&r); err != nil {
-		return nil, fmt.Errorf("gob decode record: %w", err)
+	r, err := gobcodec.Decode[engine.Record](raw)
+	if err != nil {
+		return nil, err
 	}
 	return &r, nil
 }
 
-func encodeStrings(s []string) ([]byte, error) {
-	var buf bytes.Buffer
-	if err := gob.NewEncoder(&buf).Encode(s); err != nil {
-		return nil, fmt.Errorf("gob encode strings: %w", err)
-	}
-	return buf.Bytes(), nil
-}
+func encodeStrings(s []string) ([]byte, error) { return gobcodec.Encode(s) }
 
-func decodeStrings(raw []byte) ([]string, error) {
-	var s []string
-	if err := gob.NewDecoder(bytes.NewReader(raw)).Decode(&s); err != nil {
-		return nil, fmt.Errorf("gob decode strings: %w", err)
-	}
-	return s, nil
-}
+func decodeStrings(raw []byte) ([]string, error) { return gobcodec.Decode[[]string](raw) }
