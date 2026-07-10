@@ -30,6 +30,7 @@ import (
 	"github.com/badbuka/lbsync/internal/engine"
 	"github.com/badbuka/lbsync/internal/metrics"
 	"github.com/badbuka/lbsync/internal/module"
+	"github.com/badbuka/lbsync/internal/wan"
 
 	// Side-effect imports register the available modules.
 	_ "github.com/badbuka/lbsync/internal/modules/blob"
@@ -50,6 +51,10 @@ type config struct {
 	OlricPort      int    `envconfig:"OLRIC_PORT"         default:"3320"`
 	MemberlistPort int    `envconfig:"MEMBERLIST_PORT"    default:"3322"`
 	ReplicaCount   int    `envconfig:"REPLICA_COUNT"      default:"0"`
+	WANPort        int    `envconfig:"WAN_PORT"           default:"0"`
+	TLSCert        string `envconfig:"TLS_CERT"           default:""`
+	TLSKey         string `envconfig:"TLS_KEY"            default:""`
+	TLSCA          string `envconfig:"TLS_CA"             default:""`
 
 	Password  string `envconfig:"CLUSTER_PASSWORD"   default:""`
 	GossipKey string `envconfig:"CLUSTER_GOSSIP_KEY" default:""`
@@ -75,13 +80,17 @@ func loadConfig(args []string) (config, error) {
 	fs.StringVar(&cfg.ServingDir, "serving-dir", cfg.ServingDir, "directory the LB reads certs from (env: SERVING_DIR)")
 	fs.StringVar(&cfg.BlobResources, "blob-resources", cfg.BlobResources, "blob module resources: name=src:dest[:strategy],... (env: BLOB_RESOURCES)")
 	fs.StringVar(&cfg.Modules, "modules", cfg.Modules, "comma-separated enabled modules (env: MODULES)")
-	fs.StringVar(&cfg.Peers, "peers", cfg.Peers, "comma-separated host:memberlistPort peers (env: CLUSTER_PEERS)")
+	fs.StringVar(&cfg.Peers, "peers", cfg.Peers, "comma-separated peers: host:memberlistPort in LAN mode, host:wan-port in WAN mode (env: CLUSTER_PEERS)")
 	fs.StringVar(&cfg.ClusterEnv, "cluster-env", cfg.ClusterEnv, "memberlist env: local|lan|wan (env: CLUSTER_ENV)")
 	fs.StringVar(&cfg.BindAddr, "bind-addr", cfg.BindAddr, "bind address (env: BIND_ADDR)")
 	fs.StringVar(&cfg.AdvertiseAddr, "advertise-addr", cfg.AdvertiseAddr, "advertised address for peers (env: ADVERTISE_ADDR)")
 	fs.IntVar(&cfg.OlricPort, "olric-port", cfg.OlricPort, "Olric TCP port (env: OLRIC_PORT)")
 	fs.IntVar(&cfg.MemberlistPort, "memberlist-port", cfg.MemberlistPort, "memberlist gossip port (env: MEMBERLIST_PORT)")
 	fs.IntVar(&cfg.ReplicaCount, "replica-count", cfg.ReplicaCount, "replica count; 0 = len(peers)+1 (env: REPLICA_COUNT)")
+	fs.IntVar(&cfg.WANPort, "wan-port", cfg.WANPort, "HTTPS port for WAN cluster mode; 0 = use Olric (env: WAN_PORT)")
+	fs.StringVar(&cfg.TLSCert, "tls-cert", cfg.TLSCert, "PEM certificate for WAN mode; omit to auto-generate (env: TLS_CERT)")
+	fs.StringVar(&cfg.TLSKey, "tls-key", cfg.TLSKey, "PEM private key for WAN mode (env: TLS_KEY)")
+	fs.StringVar(&cfg.TLSCA, "tls-ca", cfg.TLSCA, "PEM CA cert for mTLS peer verification (env: TLS_CA)")
 	fs.StringVar(&cfg.Password, "cluster-password", cfg.Password, "Olric auth password (env: CLUSTER_PASSWORD)")
 	fs.StringVar(&cfg.GossipKey, "cluster-gossip-key", cfg.GossipKey, "base64 16/24/32-byte memberlist encryption key (env: CLUSTER_GOSSIP_KEY)")
 	fs.BoolVar(&cfg.Insecure, "insecure", cfg.Insecure, "allow running without auth/encryption (dev only) (env: INSECURE)")
@@ -148,10 +157,6 @@ func run(args []string) error {
 	}
 
 	peers := parseList(cfg.Peers)
-	clusterCfg, err := buildClusterConfig(cfg, peers)
-	if err != nil {
-		return err
-	}
 
 	reg := prometheus.NewRegistry()
 	m := metrics.New(reg)
@@ -159,15 +164,49 @@ func run(args []string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	log.Printf("lbsync starting host=%s peers=%d replicas=%d", cfg.Hostname, len(peers), clusterCfg.ReplicaCount)
-	cl, err := cluster.NewCluster(ctx, clusterCfg)
-	if err != nil {
-		return fmt.Errorf("cluster: %w", err)
+	var (
+		cl           engine.ClusterKV
+		closeCluster func(context.Context) error
+	)
+
+	if cfg.WANPort == 0 {
+		// LAN/local mode: Olric cluster
+		clusterCfg, err := buildClusterConfig(cfg, peers)
+		if err != nil {
+			return err
+		}
+		log.Printf("lbsync starting olric host=%s peers=%d replicas=%d",
+			cfg.Hostname, len(peers), clusterCfg.ReplicaCount)
+		olricCl, err := cluster.NewCluster(ctx, clusterCfg)
+		if err != nil {
+			return fmt.Errorf("cluster: %w", err)
+		}
+		cl = olricCl
+		closeCluster = olricCl.Close
+	} else {
+		// WAN mode: HTTPS backend; peers are "host:wan-port" HTTPS addresses
+		log.Printf("lbsync starting wan-backend host=%s port=%d peers=%d",
+			cfg.Hostname, cfg.WANPort, len(peers))
+		wanCl, err := wan.New(ctx, wan.Config{
+			BindAddr: cfg.BindAddr,
+			Port:     cfg.WANPort,
+			Peers:    peers,
+			CertFile: cfg.TLSCert,
+			KeyFile:  cfg.TLSKey,
+			CAFile:   cfg.TLSCA,
+			Hostname: cfg.Hostname,
+		})
+		if err != nil {
+			return fmt.Errorf("wan cluster: %w", err)
+		}
+		cl = wanCl
+		closeCluster = wanCl.Close
 	}
+
 	defer func() {
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer shutdownCancel()
-		if cerr := cl.Close(shutdownCtx); cerr != nil {
+		if cerr := closeCluster(shutdownCtx); cerr != nil {
 			log.Printf("cluster shutdown: %v", cerr)
 		}
 	}()
@@ -251,7 +290,7 @@ func buildClusterConfig(cfg config, peers []string) (cluster.Config, error) {
 	}, nil
 }
 
-func startModules(ctx context.Context, cfg config, eng *engine.Engine, cl *cluster.Cluster, m *metrics.Metrics) error {
+func startModules(ctx context.Context, cfg config, eng *engine.Engine, cl engine.ClusterKV, m *metrics.Metrics) error {
 	blobResources, err := parseBlobResources(cfg.BlobResources)
 	if err != nil {
 		return fmt.Errorf("blob resources: %w", err)

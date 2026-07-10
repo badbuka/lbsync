@@ -56,3 +56,15 @@ func scanCertbotVerbose(root string) ([]Entry, error) {
 
 	return out, nil
 }
+
+func resolveCertPath(path string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", err
+	}
+	abs, err := filepath.Abs(resolved)
+	if err != nil {
+		return "", err
+	}
+	return abs, nil
+}

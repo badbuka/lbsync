@@ -44,17 +44,6 @@ func LoadKey(path string) ([]byte, error) {
 	return raw, nil
 }
 
-// Material is a parsed leaf certificate plus the raw PEM blobs needed to serve
-// TLS. ChainPEM and FullPEM may be empty when the source layout does not
-// provide them.
-type Material struct {
-	Leaf     *x509.Certificate
-	CertPEM  []byte
-	KeyPEM   []byte
-	ChainPEM []byte
-	FullPEM  []byte
-}
-
 // LooksLikeCertificate reports whether raw contains a parseable X.509
 // certificate in PEM or DER form.
 func LooksLikeCertificate(raw []byte) bool {

@@ -1,13 +1,9 @@
 // Package cluster wraps an embedded Olric member and exposes a small facade
-// used by the engine (key/value with per-key locking and membership). It also
-// declares the Counter/Topic/Leader interfaces that future coordination
-// modules will use, so they can be added without reworking this package.
+// used by the engine (key/value with per-key locking and membership).
 package cluster
 
 import (
-	"bytes"
 	"context"
-	"encoding/gob"
 	"errors"
 	"fmt"
 	"sync"
@@ -17,6 +13,7 @@ import (
 	"github.com/olric-data/olric/config"
 
 	"github.com/badbuka/lbsync/internal/engine"
+	"github.com/badbuka/lbsync/internal/gobcodec"
 )
 
 // Config configures the embedded Olric member.
@@ -257,34 +254,16 @@ func (c *Cluster) Close(ctx context.Context) error {
 	return c.db.Shutdown(ctx)
 }
 
-func encodeRecord(r *engine.Record) ([]byte, error) {
-	var buf bytes.Buffer
-	if err := gob.NewEncoder(&buf).Encode(r); err != nil {
-		return nil, fmt.Errorf("gob encode record: %w", err)
-	}
-	return buf.Bytes(), nil
-}
+func encodeRecord(r *engine.Record) ([]byte, error) { return gobcodec.Encode(r) }
 
 func decodeRecord(raw []byte) (*engine.Record, error) {
-	var r engine.Record
-	if err := gob.NewDecoder(bytes.NewReader(raw)).Decode(&r); err != nil {
-		return nil, fmt.Errorf("gob decode record: %w", err)
+	r, err := gobcodec.Decode[engine.Record](raw)
+	if err != nil {
+		return nil, err
 	}
 	return &r, nil
 }
 
-func encodeStrings(s []string) ([]byte, error) {
-	var buf bytes.Buffer
-	if err := gob.NewEncoder(&buf).Encode(s); err != nil {
-		return nil, fmt.Errorf("gob encode index: %w", err)
-	}
-	return buf.Bytes(), nil
-}
+func encodeStrings(s []string) ([]byte, error) { return gobcodec.Encode(s) }
 
-func decodeStrings(raw []byte) ([]string, error) {
-	var s []string
-	if err := gob.NewDecoder(bytes.NewReader(raw)).Decode(&s); err != nil {
-		return nil, fmt.Errorf("gob decode index: %w", err)
-	}
-	return s, nil
-}
+func decodeStrings(raw []byte) ([]string, error) { return gobcodec.Decode[[]string](raw) }
